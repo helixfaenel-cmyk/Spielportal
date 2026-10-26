@@ -308,9 +308,58 @@
       transform: translateY(-4px);
     }
 
+    .yatzy-die.held:disabled {
+      opacity: 1;
+    }
+
+    .yatzy-die.rolling {
+      animation: yatzy-roll 700ms ease-in-out both;
+    }
+
+    @keyframes yatzy-roll {
+      0% { transform: rotate(0) scale(1); }
+      25% { transform: rotate(-18deg) scale(0.86); }
+      55% { transform: rotate(20deg) scale(1.08); }
+      80% { transform: rotate(-8deg) scale(0.96); }
+      100% { transform: rotate(0) scale(1); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .yatzy-die.rolling {
+        animation-duration: 1ms;
+      }
+    }
+
     .yatzy-die:disabled {
       cursor: default;
       opacity: 0.65;
+    }
+
+    .yatzy-turn-popup {
+      position: fixed;
+      z-index: 20;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(5, 7, 18, 0.72);
+      pointer-events: none;
+    }
+
+    .yatzy-turn-popup[hidden] {
+      display: none;
+    }
+
+    .yatzy-turn-popup span {
+      padding: 22px 34px;
+      border: 1px solid rgba(180, 168, 255, 0.55);
+      border-radius: 18px;
+      background: linear-gradient(145deg, #292546, #191b30);
+      box-shadow: 0 20px 70px rgba(0, 0, 0, 0.55);
+      color: #fff;
+      font-size: clamp(2rem, 8vw, 4rem);
+      font-weight: 800;
+      text-align: center;
     }
 
     .yatzy-table-wrap {
@@ -594,6 +643,38 @@
       color: #9dd9ee;
     }
 
+    .sea-cell.revealed-ship {
+      border-color: #f2c14e;
+      background: rgba(242, 193, 78, 0.38);
+      color: #fff2c4;
+    }
+
+    .sea-cell.bomb {
+      border-color: #ff8c42;
+      background: rgba(247, 127, 0, 0.32);
+    }
+
+    .battleship-energy {
+      margin: 0 0 10px;
+      text-align: center;
+      font-weight: 700;
+    }
+
+    .battleship-abilities {
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 0;
+    }
+
+    .battleship-abilities[hidden] {
+      display: none;
+    }
+
+    .battleship-ability.selected {
+      border-color: #b4a8ff;
+      background: rgba(157, 140, 255, 0.28);
+    }
+
     .battleship-page .game-status {
       margin-top: -8px;
     }
@@ -756,6 +837,9 @@
   </style>
 </head>
 <body>
+  <div class="yatzy-turn-popup" id="yatzy-turn-popup" role="status" aria-live="assertive" hidden>
+    <span>Du bist dran</span>
+  </div>
   <main>
     <p class="status" id="viewer-notice" role="status" hidden>Du bist im Zuschauermodus. Spielzüge und Neustarts sind deaktiviert.</p>
     <section class="card login-card" id="login-page">
@@ -839,6 +923,13 @@
         <button class="logout" id="back-from-battleship" type="button">Zurück</button>
       </header>
       <p class="game-status" id="battleship-status" role="status" aria-live="polite">Wähle ein Schiff und dann sein Zielfeld.</p>
+      <p class="battleship-energy" id="battleship-energy">Energie: 0</p>
+      <div class="game-actions battleship-abilities" id="battleship-abilities" aria-label="Fähigkeiten" hidden>
+        <button class="game-control battleship-ability" data-ability="cross" type="button">Kreuz (2 Energie)</button>
+        <button class="game-control battleship-ability" data-ability="bomb" type="button">Bombe (4 Energie)</button>
+        <button class="game-control battleship-ability" data-ability="area" type="button">3×3-Feld (5 Energie)</button>
+        <button class="game-control battleship-ability" data-ability="row" type="button">Reihe (10 Energie)</button>
+      </div>
       <div class="fleet-boards">
         <section class="fleet-section" aria-labelledby="enemy-board-title">
           <h2 id="enemy-board-title">Gegner</h2>
@@ -950,6 +1041,7 @@
     const backFromYatzy = document.querySelector("#back-from-yatzy");
     const yatzyStatus = document.querySelector("#yatzy-status");
     const yatzyDiceElement = document.querySelector("#yatzy-dice");
+    const yatzyTurnPopup = document.querySelector("#yatzy-turn-popup");
     const yatzyScorecard = document.querySelector("#yatzy-scorecard");
     const rollYatzyButton = document.querySelector("#roll-yatzy");
     const restartYatzyButton = document.querySelector("#restart-yatzy");
@@ -982,6 +1074,10 @@
     let localGames = {};
     let yatzyHeld = Array(5).fill(false);
     let yatzyHeldPlayer = null;
+    let yatzyLastRollCount = null;
+    let yatzyLastRollPlayer = null;
+    let yatzyLastTurnPlayer = null;
+    let yatzyTurnPopupTimer = null;
     let gameSocket = null;
     let activeGame = null;
     let playerFleet;
@@ -989,15 +1085,23 @@
     let playerShots;
     let enemyShots;
     let findMatchState = null;
+    let findMatchClaimPending = false;
+    let renderedFindMatchRound = null;
     let battleshipFinished = false;
     let battleStarted = false;
     let battleshipState = null;
+    let battleshipActionPending = false;
+    let selectedBattleshipAbility = null;
+    let battleshipAbilityPlayer = null;
     let selectedShipId = null;
     let selectedHorizontal = true;
     let shipDrag = null;
     let sunkEnemyPositions = new Set();
     const rotateShip = document.querySelector("#rotate-ship");
     const startBattleshipButton = document.querySelector("#start-battleship");
+    const battleshipEnergy = document.querySelector("#battleship-energy");
+    const battleshipAbilities = document.querySelector("#battleship-abilities");
+    const battleshipAbilityButtons = [...document.querySelectorAll(".battleship-ability")];
     const playerBoardTitle = document.querySelector("#player-board-title");
     const enemyBoardTitle = document.querySelector("#enemy-board-title");
     const winningLines = [
@@ -1052,12 +1156,12 @@
       ["largeStraight", "Große Straße"], ["chance", "Chance"], ["yatzy", "Yatzy"],
     ];
     const findMatchColors = {
-      "#ff6b6b": "Koralle",
-      "#ffd166": "Gelb",
-      "#06d6a0": "Türkis",
-      "#4cc9f0": "Blau",
-      "#b388ff": "Violett",
-      "#ff8fab": "Pink",
+      "#d62828": "Rot",
+      "#f2c14e": "Gelb",
+      "#2a9d8f": "Türkis",
+      "#277da1": "Blau",
+      "#7b2cbf": "Violett",
+      "#f77f00": "Orange",
     };
     const findMatchShapes = ["circle", "square", "triangle", "diamond", "star"];
     const memoryAnimals = ["🐶", "🐱", "🐭", "🐰", "🦊", "🐻", "🐼", "🐸", "🐵", "🐷", "🐮", "🐔"];
@@ -1081,8 +1185,10 @@
         cell.setAttribute("aria-label", coordinate);
         const wasShot = shots[position];
         const shipId = fleet.grid[position];
+        const hasBomb = isPlayer && (battleshipState?.bombsOnFleet || []).includes(position);
+        const revealedShip = !isPlayer && Boolean(battleshipState?.revealedOnEnemy?.[position]);
 
-        if (shipId !== -1 && (isPlayer || isSpectator)) {
+        if (shipId !== -1 && (isPlayer || isSpectator || battleshipFinished)) {
           cell.classList.add("ship");
           if (!battleStarted && shipId === selectedShipId) cell.classList.add("selected");
         }
@@ -1095,13 +1201,37 @@
           cell.classList.add(wasShot === "hit" ? "hit" : "miss");
           cell.textContent = wasShot === "hit" ? "×" : "·";
           cell.setAttribute("aria-label", `${coordinate}: ${wasShot === "hit" ? "Treffer" : "Daneben"}`);
+        } else if (hasBomb) {
+          cell.classList.add("bomb");
+          cell.textContent = "💣";
+          cell.setAttribute("aria-label", `${coordinate}: Bombe`);
+        } else if (revealedShip) {
+          cell.classList.add("revealed-ship");
+          cell.textContent = "◆";
+          cell.setAttribute("aria-label", `${coordinate}: Schiff durch Bombe aufgedeckt`);
         }
 
         if (isPlayer) {
-          cell.disabled = isSpectator || battleStarted || (battleshipState && battleshipState.ready);
+          const canPlaceBomb = selectedBattleshipAbility === "bomb" &&
+            !battleshipActionPending &&
+            battleshipState?.currentPlayer === (localTestMode ? battleshipState.account : currentAccount) &&
+            shipId === -1 && !wasShot && !hasBomb;
+          cell.disabled = isSpectator || (battleStarted
+            ? !canPlaceBomb
+            : Boolean(battleshipState && battleshipState.ready));
+          if (canPlaceBomb) {
+            cell.addEventListener("click", (event) => {
+              event.stopPropagation();
+              placeBattleshipBomb(position);
+            });
+          }
         } else {
-          cell.disabled = isSpectator || !battleStarted || Boolean(wasShot) || battleshipFinished ||
-            !battleshipState ||
+          const canUseAbility = selectedBattleshipAbility && selectedBattleshipAbility !== "bomb";
+          const abilityNeedsSpace = selectedBattleshipAbility === "cross" || selectedBattleshipAbility === "area";
+          const abilityCenterAtEdge = row === 0 || row === boardSize - 1 || column === 0 || column === boardSize - 1;
+          cell.disabled = isSpectator || !battleStarted || selectedBattleshipAbility === "bomb" ||
+            battleshipActionPending || (Boolean(wasShot) && !canUseAbility) || battleshipFinished ||
+            !battleshipState || (abilityNeedsSpace && abilityCenterAtEdge) ||
             battleshipState.currentPlayer !== (localTestMode ? battleshipState.account : currentAccount);
           cell.addEventListener("click", () => fireAt(position));
         }
@@ -1141,6 +1271,9 @@
       }
       gameSocket = null;
       activeGame = null;
+      battleshipActionPending = false;
+      selectedBattleshipAbility = null;
+      battleshipAbilityPlayer = null;
     }
 
     function connectGame(game) {
@@ -1188,7 +1321,10 @@
         }
         if (message.type !== "state" || message.game !== game) return;
         if (message.playerNames) setPlayerNames(message.playerNames);
-        if (game === "battleship") renderBattleshipState(message);
+        if (game === "battleship") {
+          battleshipActionPending = false;
+          renderBattleshipState(message);
+        }
         else if (game === "yatzy") renderYatzyState(message);
         else if (game === "find-match") renderFindMatchState(message);
         else if (game === "memory") renderMemoryState(message);
@@ -1245,6 +1381,10 @@
 
     function renderBattleshipState(state) {
       battleshipState = state;
+      if (battleshipAbilityPlayer !== state.currentPlayer) {
+        selectedBattleshipAbility = null;
+        battleshipAbilityPlayer = state.currentPlayer;
+      }
       playerFleet = state.fleet;
       enemyFleet = state.opponentFleet || { grid: Array(boardSize * boardSize).fill(-1), ships: [] };
       playerShots = state.shotsOnEnemy.map((shot) => shot || "");
@@ -1255,6 +1395,18 @@
       const viewAccount = state.account === "spectator" ? "sonni" : state.account || currentAccount;
       const opponent = viewAccount === "sonni" ? "felix" : "sonni";
       const opponentName = playerName(opponent);
+      const energy = state.energy || { sonni: 0, felix: 0 };
+      const isOwnTurn = state.currentPlayer === viewAccount && !isSpectator && !state.winner;
+      const abilityCosts = { cross: 2, bomb: 4, area: 5, row: 10 };
+      battleshipEnergy.textContent = `Energie: ${energy[viewAccount] || 0} · ${opponentName}: ${energy[opponent] || 0} (+1 bei normalem Schuss)`;
+      battleshipAbilities.hidden = !state.started || isSpectator;
+      battleshipAbilityButtons.forEach((button) => {
+        const ability = button.dataset.ability;
+        button.disabled = !isOwnTurn || battleshipActionPending ||
+          (energy[viewAccount] || 0) < abilityCosts[ability];
+        button.classList.toggle("selected", selectedBattleshipAbility === ability);
+        button.setAttribute("aria-pressed", String(selectedBattleshipAbility === ability));
+      });
       if (localTestMode || isSpectator) {
         playerBoardTitle.textContent = `${playerName(viewAccount)}s Flotte`;
         enemyBoardTitle.textContent = opponentName;
@@ -1294,6 +1446,20 @@
         battleshipStatus.textContent = `${playerName(state.currentPlayer)} ist dran.`;
       }
 
+      if (state.bombNotice && !state.winner) {
+        battleshipStatus.textContent = state.bombNotice;
+      } else if (selectedBattleshipAbility && isOwnTurn) {
+        const prompts = {
+          cross: "Wähle ein Feld nicht am Brettrand; das Kreuz wird beschossen.",
+          bomb: "Wähle ein freies Feld auf deinem Brett, auf dem du die Bombe platzieren möchtest.",
+          area: "Wähle die Mitte des 3×3-Felds nicht am Brettrand; das Feld wird beschossen.",
+          row: "Wähle ein Feld in der Reihe, die du beschießen möchtest.",
+        };
+        battleshipStatus.textContent = prompts[selectedBattleshipAbility];
+      } else if (battleshipActionPending) {
+        battleshipStatus.textContent = "Aktion wird ausgeführt …";
+      }
+
       renderFleetBoard(enemyBoardElement, false);
       renderFleetBoard(playerBoardElement, true);
     }
@@ -1307,11 +1473,28 @@
       if (category === "threeKind") return counts.some((count) => count >= 3) ? sum : 0;
       if (category === "fourKind") return counts.some((count) => count >= 4) ? sum : 0;
       if (category === "fullHouse") return counts.includes(3) && counts.includes(2) ? 25 : 0;
-      if (category === "smallStraight") return [1, 2, 3, 4, 5].every((face) => counts[face] > 0) ? 30 : 0;
-      if (category === "largeStraight") return [2, 3, 4, 5, 6].every((face) => counts[face] > 0) ? 40 : 0;
+      if (category === "smallStraight") {
+        for (let start = 1; start <= 3; start += 1) {
+          if ([0, 1, 2, 3].every((offset) => counts[start + offset] > 0)) return 30;
+        }
+        return 0;
+      }
+      if (category === "largeStraight") {
+        for (let start = 1; start <= 2; start += 1) {
+          if ([0, 1, 2, 3, 4].every((offset) => counts[start + offset] > 0)) return 40;
+        }
+        return 0;
+      }
       if (category === "chance") return sum;
       if (category === "yatzy") return counts.includes(5) ? 50 : 0;
       return 0;
+    }
+
+    function resetYatzyTurnPopup() {
+      window.clearTimeout(yatzyTurnPopupTimer);
+      yatzyTurnPopupTimer = null;
+      yatzyTurnPopup.hidden = true;
+      yatzyLastTurnPlayer = null;
     }
 
     function getYatzyTotal(scores) {
@@ -1325,23 +1508,45 @@
     function renderYatzyState(state) {
       yatzyState = state;
       if (yatzyHeldPlayer !== state.currentPlayer) {
-        yatzyHeld = Array(5).fill(false);
+        yatzyHeld = Array.isArray(state.held) ? [...state.held] : Array(5).fill(false);
         yatzyHeldPlayer = state.currentPlayer;
+      } else if (Array.isArray(state.held)) {
+        yatzyHeld = [...state.held];
       }
+      const shouldAnimateRoll = yatzyLastRollPlayer === state.currentPlayer &&
+        yatzyLastRollCount !== null && state.rollCount > yatzyLastRollCount;
+      yatzyLastRollPlayer = state.currentPlayer;
+      yatzyLastRollCount = state.rollCount;
       const playingAccount = localTestMode ? state.currentPlayer : currentAccount;
       const isTurn = state.currentPlayer === playingAccount && !state.winner && !state.draw;
+      if (yatzyLastTurnPlayer !== state.currentPlayer) {
+        yatzyLastTurnPlayer = state.currentPlayer;
+        if (isTurn) {
+          window.clearTimeout(yatzyTurnPopupTimer);
+          yatzyTurnPopup.hidden = false;
+          yatzyTurnPopupTimer = window.setTimeout(() => {
+            yatzyTurnPopup.hidden = true;
+            yatzyTurnPopupTimer = null;
+          }, 1000);
+        }
+      }
       yatzyDiceElement.replaceChildren();
       state.dice.forEach((die, index) => {
         const button = document.createElement("button");
-        button.className = `yatzy-die${yatzyHeld[index] ? " held" : ""}`;
+        button.className = "yatzy-die";
+        if (yatzyHeld[index]) button.classList.add("held");
+        if (shouldAnimateRoll && !yatzyHeld[index]) button.classList.add("rolling");
         button.type = "button";
         button.textContent = String(die);
         button.setAttribute("aria-label", `Würfel ${index + 1}: ${die}${yatzyHeld[index] ? ", gehalten" : ""}`);
         button.setAttribute("aria-pressed", String(yatzyHeld[index]));
         button.disabled = !isTurn || state.rollCount === 0 || state.rollCount >= 3;
         button.addEventListener("click", () => {
-          yatzyHeld[index] = !yatzyHeld[index];
-          renderYatzyState(yatzyState);
+          const updatedHeld = [...yatzyHeld];
+          updatedHeld[index] = !updatedHeld[index];
+          if (sendGameAction({ type: "hold", held: updatedHeld })) {
+            renderYatzyState({ ...yatzyState, held: updatedHeld });
+          }
         });
         yatzyDiceElement.append(button);
       });
@@ -1356,7 +1561,12 @@
       } else if (isTurn) {
         yatzyStatus.textContent = `${playingName} ist dran. Würfe: ${state.rollCount}/3.`;
       } else {
-        yatzyStatus.textContent = `${playerName(state.currentPlayer)} ist dran.`;
+        const heldDice = yatzyHeld
+          .map((held, index) => held ? `${index + 1} (${state.dice[index]})` : null)
+          .filter(Boolean);
+        yatzyStatus.textContent = heldDice.length
+          ? `${playerName(state.currentPlayer)} ist dran und hält Würfel ${heldDice.join(", ")}.`
+          : `${playerName(state.currentPlayer)} ist dran.`;
       }
 
       yatzyScorecard.replaceChildren();
@@ -1449,6 +1659,7 @@
         scores: { sonni: 0, felix: 0 },
         winner: null,
         lastScorer: null,
+        lastResult: null,
       };
     }
 
@@ -1488,6 +1699,10 @@
 
     function renderFindMatchState(state) {
       findMatchState = state;
+      if (state.round !== renderedFindMatchRound) {
+        findMatchClaimPending = false;
+        renderedFindMatchRound = state.round;
+      }
       findMatchSonniScore.textContent = String(state.scores.sonni);
       findMatchFelixScore.textContent = String(state.scores.felix);
       for (const [cardIndex, card] of state.cards.entries()) {
@@ -1497,7 +1712,8 @@
           button.className = "find-match-item";
           button.type = "button";
           const sideAccount = cardIndex === 0 ? "felix" : "sonni";
-          button.disabled = isSpectator || Boolean(state.winner) || (!localTestMode && state.account !== sideAccount);
+          button.disabled = isSpectator || Boolean(state.winner) || findMatchClaimPending ||
+            (!localTestMode && state.account !== sideAccount);
           const shapeName = item.shape === "circle" ? "Kreis"
             : item.shape === "square" ? "Quadrat"
               : item.shape === "triangle" ? "Dreieck"
@@ -1505,7 +1721,17 @@
           button.setAttribute("aria-label", `${shapeName}, ${findMatchColors[item.color]}, Größe ${item.size}`);
           button.append(makeFindMatchSvg(item));
           button.addEventListener("click", () => {
-            sendGameAction({ type: "claim", card: cardIndex, index: itemIndex, round: state.round });
+            if (findMatchClaimPending) return;
+            findMatchClaimPending = true;
+            findMatchCards.forEach((findMatchCard) => {
+              findMatchCard.querySelectorAll("button").forEach((itemButton) => {
+                itemButton.disabled = true;
+              });
+            });
+            if (!sendGameAction({ type: "claim", card: cardIndex, index: itemIndex, round: state.round })) {
+              findMatchClaimPending = false;
+              renderFindMatchState(state);
+            }
           });
           findMatchCards[cardIndex].append(button);
         });
@@ -1513,12 +1739,14 @@
 
       if (state.winner) {
         findMatchStatus.textContent = `${playerName(state.winner)} hat mit 10 Punkten gewonnen!`;
+      } else if (state.lastScorer && state.lastResult === "correct") {
+        findMatchStatus.textContent = `Richtiger Treffer: ${playerName(state.lastScorer)} erhält einen Punkt. Runde ${state.round}.`;
+      } else if (state.lastScorer && state.lastResult === "wrong") {
+        findMatchStatus.textContent = `Falscher Tipp: ${playerName(state.lastScorer)} erhält einen Punkt. Runde ${state.round}.`;
       } else if (localTestMode) {
-        findMatchStatus.textContent = `Links ${playerName("felix")}, rechts ${playerName("sonni")}. Wer zuerst das passende Item klickt, erhält einen Punkt. Runde ${state.round}.`;
-      } else if (state.lastScorer) {
-        findMatchStatus.textContent = `${playerName(state.lastScorer)} erhält einen Punkt. Runde ${state.round}.`;
+        findMatchStatus.textContent = `Links ${playerName("felix")}, rechts ${playerName("sonni")}. Ein Tipp pro Runde: richtiger Treffer gibt dir einen Punkt, ein Fehlversuch dem Gegner. Runde ${state.round}.`;
       } else {
-        findMatchStatus.textContent = `Runde ${state.round}: Klicke zuerst auf die passende Form mit gleicher Farbe.`;
+        findMatchStatus.textContent = `Runde ${state.round}: Ein Tipp pro Runde. Richtiger Treffer gibt dir einen Punkt, ein Fehlversuch dem Gegner.`;
       }
     }
 
@@ -1607,6 +1835,7 @@
       const emptyScores = () => Object.fromEntries(yatzyCategories.map(([category]) => [category, null]));
       return {
         dice: [1, 1, 1, 1, 1],
+        held: Array(5).fill(false),
         rollCount: 0,
         currentPlayer: "sonni",
         scores: { sonni: emptyScores(), felix: emptyScores() },
@@ -1616,10 +1845,18 @@
     }
 
     function createLocalBattleship() {
+      const createPlayer = () => ({
+        fleet: createLocalFleet(),
+        shots: Array(boardSize * boardSize).fill(null),
+        bombs: [],
+        revealedOnEnemy: Array(boardSize * boardSize).fill(false),
+        energy: 0,
+        ready: false,
+      });
       return {
         players: {
-          sonni: { fleet: createLocalFleet(), shots: Array(boardSize * boardSize).fill(null), ready: false },
-          felix: { fleet: createLocalFleet(), shots: Array(boardSize * boardSize).fill(null), ready: false },
+          sonni: createPlayer(),
+          felix: createPlayer(),
         },
         setupPlayer: "sonni",
         started: false,
@@ -1669,6 +1906,14 @@
         fleet: player.fleet,
         shotsOnEnemy: player.shots,
         shotsOnMe: opposingPlayer.shots,
+        bombsOnFleet: player.bombs,
+        revealedOnEnemy: player.revealedOnEnemy,
+        energy: {
+          sonni: game.players.sonni.energy,
+          felix: game.players.felix.energy,
+        },
+        bombNotice: player.bombNotice || null,
+        opponentBombs: null,
         sunkOnEnemy: opposingPlayer.fleet.ships
           .filter((ship) => ship.hits === ship.positions.length)
           .flatMap((ship) => ship.positions),
@@ -1733,11 +1978,16 @@
 
       if (activeGame === "yatzy") {
         if (game.winner || game.draw) return;
-        if (action.type === "roll" &&
+        if (action.type === "hold" && game.rollCount > 0 && game.rollCount < 3 &&
+            Array.isArray(action.held) && action.held.length === 5 &&
+            action.held.every((held) => typeof held === "boolean")) {
+          game.held = [...action.held];
+        } else if (action.type === "roll" &&
             (game.currentPlayer === "sonni" || game.currentPlayer === "felix") &&
             game.rollCount < 3 && Array.isArray(action.held) && action.held.length === 5) {
           game.dice = game.dice.map((die, index) =>
             action.held[index] && game.rollCount > 0 ? die : Math.floor(Math.random() * 6) + 1);
+          game.held = [...action.held];
           game.rollCount += 1;
         } else if (action.type === "score" && game.rollCount > 0 &&
             yatzyCategories.some(([category]) => category === action.category) &&
@@ -1756,6 +2006,7 @@
             game.currentPlayer = game.currentPlayer === "sonni" ? "felix" : "sonni";
             game.rollCount = 0;
             game.dice = [1, 1, 1, 1, 1];
+            game.held = Array(5).fill(false);
           }
         }
         renderLocalGame();
@@ -1768,22 +2019,22 @@
             action.card < 0 || action.card > 1 || action.index < 0 ||
             action.index >= game.cards[action.card].length) return;
         const item = game.cards[action.card][action.index];
-        if (item.shape !== game.matchKey.shape || item.color !== game.matchKey.color) {
-          findMatchStatus.textContent = "Das ist nicht das passende Item.";
-          return;
-        }
-        const player = action.card === 0 ? "felix" : "sonni";
-        game.scores[player] += 1;
-        game.lastScorer = player;
-        if (game.scores[player] >= 10) {
-          game.winner = player;
-          localWins[player] += 1;
+        const isCorrect = item.shape === game.matchKey.shape && item.color === game.matchKey.color;
+        const sideAccount = action.card === 0 ? "felix" : "sonni";
+        const pointAccount = isCorrect ? sideAccount : sideAccount === "sonni" ? "felix" : "sonni";
+        game.scores[pointAccount] += 1;
+        game.lastScorer = pointAccount;
+        game.lastResult = isCorrect ? "correct" : "wrong";
+        if (game.scores[pointAccount] >= 10) {
+          game.winner = pointAccount;
+          localWins[pointAccount] += 1;
           renderLocalScoreboard();
         } else {
           const nextRound = createFindMatchGame();
           nextRound.round = game.round + 1;
           nextRound.scores = game.scores;
-          nextRound.lastScorer = player;
+          nextRound.lastScorer = pointAccount;
+          nextRound.lastResult = game.lastResult;
           localGames[activeGame] = nextRound;
         }
         renderLocalGame();
@@ -1847,18 +2098,93 @@
       } else if (action.type === "shoot" && game.started && !game.winner &&
           Number.isInteger(action.position) && action.position >= 0 &&
           action.position < boardSize * boardSize && player.shots[action.position] === null) {
+        player.bombNotice = null;
         const shipId = opponent.fleet.grid[action.position];
         player.shots[action.position] = shipId === -1 ? "miss" : "hit";
+        player.energy += 1;
         if (shipId !== -1) opponent.fleet.ships[shipId].hits += 1;
+        if (opponent.bombs.includes(action.position)) {
+          opponent.bombs = opponent.bombs.filter((position) => position !== action.position);
+          const revealedShips = player.fleet.grid
+            .map((targetShipId, position) => targetShipId !== -1 && opponent.shots[position] === null ? position : -1)
+            .filter((position) => position !== -1);
+          if (revealedShips.length) {
+            const revealedPosition = revealedShips[Math.floor(Math.random() * revealedShips.length)];
+            opponent.revealedOnEnemy[revealedPosition] = true;
+          }
+          opponent.bombNotice = "Deine Bombe wurde ausgelöst und hat ein gegnerisches Schiffsfeld aufgedeckt.";
+        }
         if (opponent.fleet.ships.every((ship) => ship.hits === ship.positions.length)) {
           game.winner = accountName;
           localWins[accountName] += 1;
           renderLocalScoreboard();
         } else {
-          game.currentPlayer = accountName === "sonni" ? "felix" : "sonni";
+          advanceLocalBattleshipTurn(game, accountName);
+        }
+      } else if (action.type === "ability" && game.started && !game.winner) {
+        const abilityCosts = { cross: 2, bomb: 4, area: 5, row: 10 };
+        const cost = Object.hasOwn(abilityCosts, action.ability) ? abilityCosts[action.ability] : 0;
+        if (!cost || player.energy < cost) return;
+        player.bombNotice = null;
+
+        if (action.ability === "bomb") {
+          if (!Number.isInteger(action.position) || action.position < 0 ||
+              action.position >= boardSize * boardSize || player.fleet.grid[action.position] !== -1 ||
+              opponent.shots[action.position] !== null || player.bombs.includes(action.position)) return;
+          player.energy -= cost;
+          player.bombs.push(action.position);
+        } else {
+          let positions;
+          if (action.ability === "row") {
+            if (!Number.isInteger(action.row) || action.row < 0 || action.row >= boardSize) return;
+            positions = Array.from({ length: boardSize }, (_, column) => action.row * boardSize + column);
+          } else {
+            if (!Number.isInteger(action.position) || action.position < 0 ||
+                action.position >= boardSize * boardSize) return;
+            const row = Math.floor(action.position / boardSize);
+            const column = action.position % boardSize;
+            if ((action.ability === "cross" || action.ability === "area") &&
+                (row === 0 || row === boardSize - 1 || column === 0 || column === boardSize - 1)) return;
+            if (action.ability === "cross") {
+              positions = [
+                action.position,
+                ...(row > 0 ? [action.position - boardSize] : []),
+                ...(row < boardSize - 1 ? [action.position + boardSize] : []),
+                ...(column > 0 ? [action.position - 1] : []),
+                ...(column < boardSize - 1 ? [action.position + 1] : []),
+              ];
+            } else {
+              positions = [];
+              for (let targetRow = Math.max(0, row - 1); targetRow <= Math.min(boardSize - 1, row + 1); targetRow += 1) {
+                for (let targetColumn = Math.max(0, column - 1); targetColumn <= Math.min(boardSize - 1, column + 1); targetColumn += 1) {
+                  positions.push(targetRow * boardSize + targetColumn);
+                }
+              }
+            }
+          }
+          positions = positions.filter((position) => player.shots[position] === null);
+          if (!positions.length) return;
+          player.energy -= cost;
+          for (const position of positions) {
+            const shipId = opponent.fleet.grid[position];
+            player.shots[position] = shipId === -1 ? "miss" : "hit";
+            if (shipId !== -1) opponent.fleet.ships[shipId].hits += 1;
+          }
+        }
+
+        if (opponent.fleet.ships.every((ship) => ship.hits === ship.positions.length)) {
+          game.winner = accountName;
+          localWins[accountName] += 1;
+          renderLocalScoreboard();
+        } else {
+          advanceLocalBattleshipTurn(game, accountName);
         }
       }
       renderLocalGame();
+    }
+
+    function advanceLocalBattleshipTurn(game, account) {
+      game.currentPlayer = account === "sonni" ? "felix" : "sonni";
     }
 
     function renderLocalScoreboard() {
@@ -2153,13 +2479,50 @@
       if (
         !battleStarted ||
         battleshipFinished ||
+        battleshipActionPending ||
         !battleshipState ||
         battleshipState.currentPlayer !== (localTestMode ? battleshipState.account : currentAccount) ||
-        playerShots[position]
+        (playerShots[position] && !selectedBattleshipAbility)
       ) {
         return;
       }
-      sendGameAction({ type: "shoot", position });
+      if (selectedBattleshipAbility === "bomb") return;
+      if (selectedBattleshipAbility) {
+        const action = { type: "ability", ability: selectedBattleshipAbility };
+        if (selectedBattleshipAbility === "row") {
+          action.row = Math.floor(position / boardSize);
+        } else {
+          action.position = position;
+        }
+        if (sendGameAction(action)) {
+          battleshipActionPending = !localTestMode;
+          selectedBattleshipAbility = null;
+          renderBattleshipState(battleshipState);
+        }
+        return;
+      }
+      if (sendGameAction({ type: "shoot", position })) {
+        battleshipActionPending = !localTestMode;
+        renderBattleshipState(battleshipState);
+      }
+    }
+
+    function placeBattleshipBomb(position) {
+      if (selectedBattleshipAbility !== "bomb" || !battleshipState ||
+          battleshipActionPending ||
+          battleshipState.currentPlayer !== (localTestMode ? battleshipState.account : currentAccount)) return;
+      if (sendGameAction({ type: "ability", ability: "bomb", position })) {
+        battleshipActionPending = !localTestMode;
+        selectedBattleshipAbility = null;
+        renderBattleshipState(battleshipState);
+      }
+    }
+
+    function toggleBattleshipAbility(ability) {
+      if (!battleshipState || battleshipState.currentPlayer !==
+          (localTestMode ? battleshipState.account : currentAccount)) return;
+      selectedBattleshipAbility = selectedBattleshipAbility === ability ? null : ability;
+      renderBattleshipState(battleshipState);
     }
 
     function resetGame() {
@@ -2238,6 +2601,7 @@
     });
 
     openYatzy.addEventListener("click", () => {
+      resetYatzyTurnPopup();
       disconnectGame();
       showPage("yatzy");
       document.title = "Yatzy";
@@ -2259,6 +2623,7 @@
     });
 
     backFromYatzy.addEventListener("click", () => {
+      resetYatzyTurnPopup();
       disconnectGame();
       showPage("home");
       document.title = "Spiele";
@@ -2292,6 +2657,7 @@
 
     restartYatzyButton.addEventListener("click", () => {
       if (!window.confirm("Möchtest du Yatzy wirklich neu starten? Der aktuelle Spielstand geht verloren.")) return;
+      resetYatzyTurnPopup();
       yatzyHeld = Array(5).fill(false);
       yatzyHeldPlayer = null;
       sendGameAction({ type: "restart" });
@@ -2300,6 +2666,9 @@
     rotateShip.addEventListener("click", toggleShipOrientation);
 
     startBattleshipButton.addEventListener("click", beginBattleship);
+    battleshipAbilityButtons.forEach((button) => {
+      button.addEventListener("click", () => toggleBattleshipAbility(button.dataset.ability));
+    });
 
     backFromBattleship.addEventListener("click", () => {
       disconnectGame();
@@ -2309,6 +2678,8 @@
 
     restartBattleship.addEventListener("click", () => {
       if (!window.confirm("Möchtest du Schiffe versenken wirklich neu starten? Der aktuelle Spielstand geht verloren.")) return;
+      selectedBattleshipAbility = null;
+      battleshipAbilityPlayer = null;
       sendGameAction({ type: "restart" });
     });
 

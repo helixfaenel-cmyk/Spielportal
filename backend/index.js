@@ -7,7 +7,7 @@ const YATZY_CATEGORIES = [
   "largeStraight", "chance", "yatzy",
 ];
 const FIND_MATCH_SHAPES = ["circle", "square", "triangle", "diamond", "star"];
-const FIND_MATCH_COLORS = ["#ff6b6b", "#ffd166", "#06d6a0", "#4cc9f0", "#b388ff", "#ff8fab"];
+const FIND_MATCH_COLORS = ["#d62828", "#f2c14e", "#2a9d8f", "#277da1", "#7b2cbf", "#f77f00"];
 const FIND_MATCH_ITEMS_PER_CARD = 9;
 const FIND_MATCH_TARGET_SCORE = 10;
 const MEMORY_ANIMALS = ["🐶", "🐱", "🐭", "🐰", "🦊", "🐻", "🐼", "🐸", "🐵", "🐷", "🐮", "🐔"];
@@ -80,8 +80,22 @@ function createInitialState() {
     },
     battleship: {
       players: {
-        sonni: { fleet: makeFleet(), shots: Array(BOARD_SIZE * BOARD_SIZE).fill(null), ready: false },
-        felix: { fleet: makeFleet(), shots: Array(BOARD_SIZE * BOARD_SIZE).fill(null), ready: false },
+        sonni: {
+          fleet: makeFleet(),
+          shots: Array(BOARD_SIZE * BOARD_SIZE).fill(null),
+          bombs: [],
+          revealedOnEnemy: Array(BOARD_SIZE * BOARD_SIZE).fill(false),
+          energy: 0,
+          ready: false,
+        },
+        felix: {
+          fleet: makeFleet(),
+          shots: Array(BOARD_SIZE * BOARD_SIZE).fill(null),
+          bombs: [],
+          revealedOnEnemy: Array(BOARD_SIZE * BOARD_SIZE).fill(false),
+          energy: 0,
+          ready: false,
+        },
       },
       started: false,
       currentPlayer: "sonni",
@@ -143,7 +157,7 @@ function createFindMatchRound(round) {
     otherItems.slice(FIND_MATCH_ITEMS_PER_CARD - 1, (FIND_MATCH_ITEMS_PER_CARD - 1) * 2),
     secondMatchSize,
   );
-  return { round, matchKey, cards: [left, right], lastScorer: null };
+  return { round, matchKey, cards: [left, right], lastScorer: null, lastResult: null };
 }
 
 function createFindMatchGame(round = 1, scores = { sonni: 0, felix: 0 }) {
@@ -158,6 +172,7 @@ function createYatzyGame() {
   const emptyScores = () => Object.fromEntries(YATZY_CATEGORIES.map((category) => [category, null]));
   return {
     dice: [1, 1, 1, 1, 1],
+    held: Array(5).fill(false),
     rollCount: 0,
     currentPlayer: "sonni",
     scores: { sonni: emptyScores(), felix: emptyScores() },
@@ -182,10 +197,16 @@ function scoreYatzyCategory(category, dice) {
     return counts.includes(3) && counts.includes(2) ? 25 : 0;
   }
   if (category === "smallStraight") {
-    return [1, 2, 3, 4, 5].every((face) => counts[face] > 0) ? 30 : 0;
+    for (let start = 1; start <= 3; start += 1) {
+      if ([0, 1, 2, 3].every((offset) => counts[start + offset] > 0)) return 30;
+    }
+    return 0;
   }
   if (category === "largeStraight") {
-    return [2, 3, 4, 5, 6].every((face) => counts[face] > 0) ? 40 : 0;
+    for (let start = 1; start <= 2; start += 1) {
+      if ([0, 1, 2, 3, 4].every((offset) => counts[start + offset] > 0)) return 40;
+    }
+    return 0;
   }
   if (category === "chance") return sum;
   if (category === "yatzy") return counts.includes(5) ? 50 : 0;
@@ -275,6 +296,7 @@ function makeView(state, account, online) {
       playerNames: state.playerNames,
       isSpectator: account === "spectator",
       dice: game.dice,
+      held: game.held,
       rollCount: game.rollCount,
       currentPlayer: game.currentPlayer,
       scores: game.scores,
@@ -300,6 +322,7 @@ function makeView(state, account, online) {
       cards: game.cards,
       scores: game.scores,
       lastScorer: game.lastScorer,
+      lastResult: game.lastResult,
       winner: game.winner,
       targetScore: FIND_MATCH_TARGET_SCORE,
       opponentOnline,
@@ -336,9 +359,17 @@ function makeView(state, account, online) {
     playerNames: state.playerNames,
     isSpectator: account === "spectator",
     fleet: player.fleet,
-    opponentFleet: account === "spectator" ? opposingPlayer.fleet : null,
+    opponentFleet: account === "spectator" || game.winner ? opposingPlayer.fleet : null,
     shotsOnEnemy: player.shots,
     shotsOnMe: opposingPlayer.shots,
+    bombsOnFleet: player.bombs,
+    revealedOnEnemy: player.revealedOnEnemy,
+    energy: {
+      sonni: game.players.sonni.energy,
+      felix: game.players.felix.energy,
+    },
+    bombNotice: player.bombNotice || null,
+    opponentBombs: account === "spectator" ? opposingPlayer.bombs : null,
     sunkOnEnemy: opposingPlayer.fleet.ships
       .filter((ship) => ship.hits === ship.positions.length)
       .flatMap((ship) => ship.positions),
@@ -364,6 +395,12 @@ export class GameRoom {
         (this.roomRegistered ? ["sonni"] : []);
       this.state.playerNames ||= { sonni: "Spieler 1", felix: "Spieler 2" };
       this.state.wins ||= { sonni: 0, felix: 0 };
+      for (const player of PLAYERS) {
+        const battleshipPlayer = this.state.battleship.players[player];
+        battleshipPlayer.bombs ||= [];
+        battleshipPlayer.revealedOnEnemy ||= Array(BOARD_SIZE * BOARD_SIZE).fill(false);
+        battleshipPlayer.energy ||= 0;
+      }
       this.state.ticTacToe.startingPlayer ||= this.state.ticTacToe.currentPlayer || "sonni";
       this.state.ticTacToe.nextStarter ||= this.state.ticTacToe.startingPlayer;
       this.state.yatzy ||= createYatzyGame();
@@ -832,21 +869,20 @@ export class GameRoom {
     }
 
     const item = game.cards[action.card][action.index];
-    if (item.shape !== game.matchKey.shape || item.color !== game.matchKey.color) {
-      this.sendError(socket, "Das ist nicht das passende Item.");
-      return;
-    }
-
-    game.scores[sideAccount] += 1;
-    game.lastScorer = sideAccount;
-    if (game.scores[sideAccount] >= FIND_MATCH_TARGET_SCORE) {
-      game.winner = sideAccount;
+    const isCorrect = item.shape === game.matchKey.shape && item.color === game.matchKey.color;
+    const pointAccount = isCorrect ? sideAccount : sideAccount === "sonni" ? "felix" : "sonni";
+    game.scores[pointAccount] += 1;
+    game.lastScorer = pointAccount;
+    game.lastResult = isCorrect ? "correct" : "wrong";
+    if (game.scores[pointAccount] >= FIND_MATCH_TARGET_SCORE) {
+      game.winner = pointAccount;
       return;
     }
 
     this.state["find-match"] = createFindMatchRound(game.round + 1);
     this.state["find-match"].scores = game.scores;
-    this.state["find-match"].lastScorer = sideAccount;
+    this.state["find-match"].lastScorer = pointAccount;
+    this.state["find-match"].lastResult = game.lastResult;
   }
 
   applyYatzyAction(account, action, socket) {
@@ -857,6 +893,20 @@ export class GameRoom {
     }
     if (game.currentPlayer !== account) {
       this.sendError(socket, "Der andere Spieler ist dran.");
+      return;
+    }
+
+    if (action.type === "hold") {
+      if (game.rollCount === 0 || game.rollCount >= 3) {
+        this.sendError(socket, "Du kannst Würfel erst nach dem ersten Wurf auswählen.");
+        return;
+      }
+      if (!Array.isArray(action.held) || action.held.length !== 5 ||
+          !action.held.every((held) => typeof held === "boolean")) {
+        this.sendError(socket, "Ungültige Würfelauswahl.");
+        return;
+      }
+      game.held = [...action.held];
       return;
     }
 
@@ -872,6 +922,7 @@ export class GameRoom {
       }
       game.dice = game.dice.map((die, index) =>
         action.held[index] && game.rollCount > 0 ? die : Math.floor(Math.random() * 6) + 1);
+      game.held = [...action.held];
       game.rollCount += 1;
       return;
     }
@@ -901,6 +952,7 @@ export class GameRoom {
       game.currentPlayer = account === "sonni" ? "felix" : "sonni";
       game.rollCount = 0;
       game.dice = [1, 1, 1, 1, 1];
+      game.held = Array(5).fill(false);
     }
   }
 
@@ -972,7 +1024,7 @@ export class GameRoom {
       return;
     }
 
-    if (action.type !== "shoot") {
+    if (action.type !== "shoot" && action.type !== "ability") {
       this.sendError(socket, "Unbekannte Aktion.");
       return;
     }
@@ -988,19 +1040,118 @@ export class GameRoom {
       this.sendError(socket, "Der andere Spieler ist dran.");
       return;
     }
-    if (!Number.isInteger(action.position) || action.position < 0 || action.position >= BOARD_SIZE * BOARD_SIZE || player.shots[action.position] !== null) {
+    if (action.type === "ability") {
+      const abilityCosts = { cross: 2, bomb: 4, area: 5, row: 10 };
+      const cost = Object.hasOwn(abilityCosts, action.ability) ? abilityCosts[action.ability] : 0;
+      if (!cost) {
+        this.sendError(socket, "Unbekannte Fähigkeit.");
+        return;
+      }
+      if (player.energy < cost) {
+        this.sendError(socket, "Du hast nicht genug Energie für diese Fähigkeit.");
+        return;
+      }
+      player.bombNotice = null;
+
+      if (action.ability === "bomb") {
+        if (!Number.isInteger(action.position) || action.position < 0 ||
+            action.position >= BOARD_SIZE * BOARD_SIZE || player.fleet.grid[action.position] !== -1 ||
+            opponent.shots[action.position] !== null || player.bombs.includes(action.position)) {
+          this.sendError(socket, "Wähle ein unbeschossenes, freies Feld für die Bombe.");
+          return;
+        }
+        player.energy -= cost;
+        player.bombs.push(action.position);
+      } else {
+        let positions;
+        if (action.ability === "row") {
+          if (!Number.isInteger(action.row) || action.row < 0 || action.row >= BOARD_SIZE) {
+            this.sendError(socket, "Wähle eine gültige Reihe.");
+            return;
+          }
+          positions = Array.from({ length: BOARD_SIZE }, (_, column) => action.row * BOARD_SIZE + column);
+        } else {
+          if (!Number.isInteger(action.position) || action.position < 0 ||
+              action.position >= BOARD_SIZE * BOARD_SIZE) {
+            this.sendError(socket, "Wähle ein gültiges Zielfeld.");
+            return;
+          }
+          const row = Math.floor(action.position / BOARD_SIZE);
+          const column = action.position % BOARD_SIZE;
+          if ((action.ability === "cross" || action.ability === "area") &&
+              (row === 0 || row === BOARD_SIZE - 1 || column === 0 || column === BOARD_SIZE - 1)) {
+            this.sendError(socket, "Wähle für diese Fähigkeit ein Feld außerhalb des Brettrands.");
+            return;
+          }
+          if (action.ability === "cross") {
+            positions = [
+              action.position,
+              ...(row > 0 ? [action.position - BOARD_SIZE] : []),
+              ...(row < BOARD_SIZE - 1 ? [action.position + BOARD_SIZE] : []),
+              ...(column > 0 ? [action.position - 1] : []),
+              ...(column < BOARD_SIZE - 1 ? [action.position + 1] : []),
+            ];
+          } else {
+            positions = [];
+            for (let targetRow = Math.max(0, row - 1); targetRow <= Math.min(BOARD_SIZE - 1, row + 1); targetRow += 1) {
+              for (let targetColumn = Math.max(0, column - 1); targetColumn <= Math.min(BOARD_SIZE - 1, column + 1); targetColumn += 1) {
+                positions.push(targetRow * BOARD_SIZE + targetColumn);
+              }
+            }
+          }
+        }
+        const unshotPositions = positions.filter((position) => player.shots[position] === null);
+        if (!unshotPositions.length) {
+          this.sendError(socket, "Diese Felder wurden bereits beschossen.");
+          return;
+        }
+        player.energy -= cost;
+        for (const position of unshotPositions) {
+          const shipId = opponent.fleet.grid[position];
+          player.shots[position] = shipId === -1 ? "miss" : "hit";
+          if (shipId !== -1) opponent.fleet.ships[shipId].hits += 1;
+        }
+      }
+
+      if (allShipsSunk(opponent.fleet)) {
+        game.winner = account;
+      } else {
+        this.advanceBattleshipTurn(game, account);
+      }
+      return;
+    }
+
+    if (!Number.isInteger(action.position) || action.position < 0 ||
+        action.position >= BOARD_SIZE * BOARD_SIZE || player.shots[action.position] !== null) {
       this.sendError(socket, "Dieses Feld wurde bereits beschossen oder ist ungültig.");
       return;
     }
 
+    player.bombNotice = null;
     const shipId = opponent.fleet.grid[action.position];
     player.shots[action.position] = shipId === -1 ? "miss" : "hit";
+    player.energy += 1;
     if (shipId !== -1) opponent.fleet.ships[shipId].hits += 1;
+    if (opponent.bombs.includes(action.position)) {
+      opponent.bombs = opponent.bombs.filter((position) => position !== action.position);
+      const revealedShips = player.fleet.grid
+        .map((targetShipId, position) => targetShipId !== -1 && opponent.shots[position] === null ? position : -1)
+        .filter((position) => position !== -1);
+      if (revealedShips.length) {
+        const revealedPosition = revealedShips[Math.floor(Math.random() * revealedShips.length)];
+        opponent.revealedOnEnemy[revealedPosition] = true;
+      }
+      opponent.bombNotice = "Deine Bombe wurde ausgelöst und hat ein gegnerisches Schiffsfeld aufgedeckt.";
+    }
     if (allShipsSunk(opponent.fleet)) {
       game.winner = account;
     } else {
-      game.currentPlayer = account === "sonni" ? "felix" : "sonni";
+      this.advanceBattleshipTurn(game, account);
     }
+  }
+
+  advanceBattleshipTurn(game, account) {
+    game.currentPlayer = account === "sonni" ? "felix" : "sonni";
   }
 
   webSocketClose() {
